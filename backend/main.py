@@ -257,3 +257,58 @@ def get_production_orders():
         })
 
     return result
+
+
+@app.get("/products/{product_code}/structure")
+def get_product_structure(product_code: str):
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("""
+        select
+            p.product_code,
+            p.product_name,
+            sf.semi_finished_code,
+            sf.semi_finished_name,
+            c.component_qty,
+            c.product_qty,
+            c.priority,
+            r.route_code,
+            r.route_name
+        from products p
+        join product_semi_finished_components c
+            on c.product_id = p.product_id
+        join semi_finished sf
+            on sf.semi_finished_id = c.semi_finished_id
+        join routes r
+            on r.route_id = c.route_id
+        where p.product_code = %s
+        order by c.priority
+    """, (product_code,))
+
+    rows = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    if not rows:
+        return {"error": "Product not found"}
+
+    result = {
+        "product_code": rows[0][0],
+        "product_name": rows[0][1],
+        "components": []
+    }
+
+    for row in rows:
+        result["components"].append({
+            "semi_finished_code": row[2],
+            "semi_finished_name": row[3],
+            "component_qty": float(row[4]),
+            "product_qty": float(row[5]),
+            "priority": row[6],
+            "route_code": row[7],
+            "route_name": row[8],
+        })
+
+    return result
