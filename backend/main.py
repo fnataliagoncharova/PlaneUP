@@ -312,3 +312,160 @@ def get_product_structure(product_code: str):
         })
 
     return result
+@app.get("/products/{product_code}/needs")
+def get_product_needs(product_code: str):
+    conn = get_connection()
+    cur = conn.cursor()
+
+    # 1. production_need
+    cur.execute("""
+        select
+            pn.period,
+            pn.required_qty
+        from production_need pn
+        join products p on p.product_id = pn.product_id
+        where p.product_code = %s
+    """, (product_code,))
+
+    prod_need_row = cur.fetchone()
+
+    # 2. semi_finished_need
+    cur.execute("""
+        select
+            sf.semi_finished_code,
+            sf.semi_finished_name,
+            sfn.required_semi_finished_qty
+        from semi_finished_need sfn
+        join products p on p.product_id = sfn.source_product_id
+        join semi_finished sf on sf.semi_finished_id = sfn.semi_finished_id
+        where p.product_code = %s
+        order by sf.semi_finished_code
+    """, (product_code,))
+
+    sf_rows = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    if not prod_need_row:
+        return {"error": "Product not found or no needs"}
+
+    result = {
+        "product_code": product_code,
+        "production_need": {
+            "period": prod_need_row[0],
+            "required_qty": float(prod_need_row[1])
+        },
+        "semi_finished_needs": []
+    }
+
+    for row in sf_rows:
+        result["semi_finished_needs"].append({
+            "semi_finished_code": row[0],
+            "semi_finished_name": row[1],
+            "required_qty": float(row[2])
+        })
+
+    return result
+@app.get("/products/{product_code}/orders")
+def get_product_orders(product_code: str):
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("""
+        select
+            po.order_id,
+            r.route_code,
+            r.route_name,
+            po.step_no,
+            sf.semi_finished_code,
+            sf.semi_finished_name,
+            po.planned_qty,
+            po.status
+        from production_orders po
+        join routes r on r.route_id = po.route_id
+        join semi_finished sf on sf.semi_finished_id = po.output_semi_finished_id
+        join semi_finished_need sfn on sfn.semi_finished_need_id = po.source_need_id
+        join products p on p.product_id = sfn.source_product_id
+        where p.product_code = %s
+        order by po.order_id
+    """, (product_code,))
+
+    rows = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    if not rows:
+        return {"error": "Product not found or no orders"}
+
+    result = {
+        "product_code": product_code,
+        "orders": []
+    }
+
+    for row in rows:
+        result["orders"].append({
+            "order_id": row[0],
+            "route_code": row[1],
+            "route_name": row[2],
+            "step_no": row[3],
+            "output_semi_finished_code": row[4],
+            "output_semi_finished_name": row[5],
+            "planned_qty": float(row[6]),
+            "status": row[7],
+        })
+
+    return result
+
+
+@app.get("/products/{product_code}/actuals")
+def get_product_actuals(product_code: str):
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("""
+        select
+            pa.actual_id,
+            r.route_code,
+            po.step_no,
+            sf.semi_finished_code,
+            sf.semi_finished_name,
+            pa.fact_qty,
+            pa.scrap_qty,
+            pa.fact_start,
+            pa.fact_finish
+        from production_actuals pa
+        join production_orders po on po.order_id = pa.order_id
+        join routes r on r.route_id = po.route_id
+        join semi_finished sf on sf.semi_finished_id = po.output_semi_finished_id
+        join semi_finished_need sfn on sfn.semi_finished_need_id = po.source_need_id
+        join products p on p.product_id = sfn.source_product_id
+        where p.product_code = %s
+        order by pa.actual_id
+    """, (product_code,))
+
+    rows = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    result = {
+        "product_code": product_code,
+        "actuals": []
+    }
+
+    for row in rows:
+        result["actuals"].append({
+            "actual_id": row[0],
+            "route_code": row[1],
+            "step_no": row[2],
+            "output_semi_finished_code": row[3],
+            "output_semi_finished_name": row[4],
+            "fact_qty": float(row[5]),
+            "scrap_qty": float(row[6]),
+            "fact_start": str(row[7]) if row[7] else None,
+            "fact_finish": str(row[8]) if row[8] else None,
+        })
+
+    return result
