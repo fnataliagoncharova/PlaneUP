@@ -1,7 +1,31 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List, Optional
 from db import get_connection
+import datetime
+import io
+from fastapi.responses import StreamingResponse
+from openpyxl import Workbook, load_workbook
+
+ALLOWED_UNITS = ["м²", "м"]
+
+class ProductUpdate(BaseModel):
+    product_name: Optional[str] = None
+    unit_of_measure: Optional[str] = None
+    is_active: Optional[bool] = None
+
 
 app = FastAPI(title="PlaneUP API")
+
+# Allow opening the HTML prototype from file:// or any local dev host.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*", "null"],  # file:// origin is "null"
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/")
@@ -26,7 +50,12 @@ def get_products():
     cur = conn.cursor()
 
     cur.execute("""
-        select product_id, product_code, product_name
+        select
+            product_id,
+            product_code,
+            product_name,
+            coalesce(unit_of_measure, unit) as unit_of_measure,
+            coalesce(is_active, active, true) as is_active
         from products
         order by product_code
     """)
@@ -42,9 +71,248 @@ def get_products():
             "product_id": row[0],
             "product_code": row[1],
             "product_name": row[2],
+            "unit_of_measure": row[3],
+            "is_active": bool(row[4]),
         })
 
     return result
+
+
+@app.put("/products/{product_code}")
+def update_product(product_code: str, payload: ProductUpdate):
+    update_fields = payload.dict(exclude_unset=True)
+    if not update_fields:
+        return {"status": "no_changes"}
+
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "select product_id from products where product_code = %s",
+            (product_code,),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Product not found")
+        product_id = row[0]
+
+        set_clauses = []
+        params = []
+
+        if "product_name" in update_fields:
+            set_clauses.append("product_name = %s")
+            params.append(update_fields["product_name"])
+
+        if "unit_of_measure" in update_fields:
+            # keep legacy unit column in sync
+            set_clauses.append("unit_of_measure = %s")
+            params.append(update_fields["unit_of_measure"])
+            set_clauses.append("unit = %s")
+            params.append(update_fields["unit_of_measure"])
+
+        if "is_active" in update_fields:
+            set_clauses.append("is_active = %s")
+            params.append(update_fields["is_active"])
+            set_clauses.append("active = %s")
+            params.append(update_fields["is_active"])
+
+        set_clauses.append("updated_at = now()")
+
+        if len(params) == 0:
+            return {"status": "no_changes"}
+
+        sql = f"""
+            update products
+            set {', '.join(set_clauses)}
+            where product_id = %s
+            returning
+                product_id,
+                product_code,
+                product_name,
+                coalesce(unit_of_measure, unit) as unit_of_measure,
+                coalesce(is_active, active, true) as is_active
+        """
+        params.append(product_id)
+        cur.execute(sql, tuple(params))
+        updated = cur.fetchone()
+        conn.commit()
+
+        return {
+            "product_id": updated[0],
+            "product_code": updated[1],
+            "product_name": updated[2],
+            "unit_of_measure": updated[3],
+            "is_active": bool(updated[4]),
+        }
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.get("/products/import-template")
+def get_products_import_template():
+    """
+    Downloadable Excel template for bulk import of products.
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "products"
+    headers = ["product_code", "product_name", "unit_of_measure", "is_active"]
+    ws.append(headers)
+    ws.append(["P-EXAMPLE", "Пример продукции", ALLOWED_UNITS[0], "Да"])
+
+    stream = io.BytesIO()
+    wb.save(stream)
+    stream.seek(0)
+    return StreamingResponse(
+        stream,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="products_import_template.xlsx"'},
+    )
+
+
+@app.post("/products/import")
+def import_products(file: UploadFile = File(...)):
+    """
+    Import products from uploaded Excel file (.xlsx).
+    """
+    if not file.filename.lower().endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="Требуется файл .xlsx")
+
+    try:
+        wb = load_workbook(file.file)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Не удалось прочитать Excel-файл")
+
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows or len(rows) < 2:
+        raise HTTPException(status_code=400, detail="Файл не содержит данных")
+
+    header = [str(h).strip() if h else "" for h in rows[0]]
+    expected_header = ["product_code", "product_name", "unit_of_measure", "is_active"]
+    if [h.lower() for h in header] != expected_header:
+        raise HTTPException(status_code=400, detail="Неверный заголовок файла")
+
+    seen_codes = set()
+    items = []
+    errors = []
+
+    def normalize_bool(val):
+        if val is None:
+            return None
+        if isinstance(val, bool):
+            return val
+        s = str(val).strip().lower()
+        if s in ["да", "yes", "true", "1"]:
+            return True
+        if s in ["нет", "no", "false", "0"]:
+            return False
+        return None
+
+    for idx, row in enumerate(rows[1:], start=2):  # 1-based row numbers
+        product_code, product_name, unit_of_measure, is_active_raw = row[:4]
+
+        if all(
+            (cell is None or (isinstance(cell, str) and cell.strip() == ""))
+            for cell in (product_code, product_name, unit_of_measure, is_active_raw)
+        ):
+            continue  # skip empty row
+        row_errors = []
+
+        code = (product_code or "").strip()
+        name = (product_name or "").strip()
+        unit = (unit_of_measure or "").strip()
+        active_val = normalize_bool(is_active_raw)
+
+        if not code:
+            row_errors.append("не заполнен product_code")
+        if code in seen_codes:
+            row_errors.append("дублирующийся product_code в файле")
+        if not name:
+            row_errors.append("не заполнен product_name")
+        if unit not in ALLOWED_UNITS:
+            row_errors.append("недопустимая единица измерения (разрешено: м² или м)")
+        if active_val is None:
+            row_errors.append("недопустимое значение is_active (используйте Да/Нет)")
+
+        if row_errors:
+            errors.append({"row": idx, "errors": row_errors})
+        else:
+            seen_codes.add(code)
+            items.append(
+                {
+                    "product_code": code,
+                    "product_name": name,
+                    "unit_of_measure": unit,
+                    "is_active": active_val,
+                }
+            )
+
+    created = 0
+    updated = 0
+
+    if items:
+        conn = get_connection()
+        cur = conn.cursor()
+        try:
+            for item in items:
+                cur.execute(
+                    "select product_id from products where product_code = %s",
+                    (item["product_code"],),
+                )
+                row = cur.fetchone()
+                if row:
+                    cur.execute(
+                        """
+                        update products
+                        set product_name = %s,
+                            unit_of_measure = %s,
+                            unit = %s,
+                            is_active = %s,
+                            active = %s,
+                            updated_at = now()
+                        where product_id = %s
+                        """,
+                        (
+                            item["product_name"],
+                            item["unit_of_measure"],
+                            item["unit_of_measure"],
+                            item["is_active"],
+                            item["is_active"],
+                            row[0],
+                        ),
+                    )
+                    updated += 1
+                else:
+                    cur.execute(
+                        """
+                        insert into products
+                            (product_code, product_name, unit_of_measure, is_active, unit, active)
+                        values (%s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            item["product_code"],
+                            item["product_name"],
+                            item["unit_of_measure"],
+                            item["is_active"],
+                            item["unit_of_measure"],
+                            item["is_active"],
+                        ),
+                    )
+                    created += 1
+            conn.commit()
+        finally:
+            cur.close()
+            conn.close()
+
+    return {
+        "processed": len(items),
+        "created_count": created,
+        "updated_count": updated,
+        "error_count": len(errors),
+        "errors": errors,
+    }
 
 @app.get("/semi-finished")
 def get_semi_finished():
@@ -134,6 +402,58 @@ def get_sales_plan():
 
     return result
 
+
+class SalesPlanItem(BaseModel):
+    product_code: str
+    period: str
+    qty: float
+    due_date: Optional[str] = None
+
+
+@app.post("/sales-plan")
+def save_sales_plan(items: List[SalesPlanItem]):
+    """
+    Bulk replace sales plan for provided periods.
+    For each period present in payload, existing rows are deleted then reinserted.
+    """
+    if not items:
+        return {"status": "empty", "inserted": 0}
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    try:
+        # delete existing rows for all periods present
+        periods = {item.period for item in items}
+        for period in periods:
+            cur.execute("delete from sales_plan where period = %s", (period,))
+
+        for item in items:
+            cur.execute("select product_id from products where product_code = %s", (item.product_code,))
+            product_row = cur.fetchone()
+            if not product_row:
+                raise HTTPException(status_code=400, detail=f"Unknown product_code: {item.product_code}")
+
+            due_date_val = None
+            if item.due_date:
+                try:
+                    due_date_val = datetime.date.fromisoformat(item.due_date)
+                except ValueError:
+                    raise HTTPException(status_code=400, detail=f"Invalid due_date: {item.due_date}")
+
+            cur.execute(
+                """
+                insert into sales_plan (product_id, period, qty, due_date)
+                values (%s, %s, %s, %s)
+                """,
+                (product_row[0], item.period, item.qty, due_date_val),
+            )
+
+        conn.commit()
+        return {"status": "ok", "inserted": len(items), "periods": list(periods)}
+    finally:
+        cur.close()
+        conn.close()
 @app.get("/production-need")
 def get_production_need():
     conn = get_connection()

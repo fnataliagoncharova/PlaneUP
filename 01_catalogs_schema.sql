@@ -5,6 +5,8 @@ create table products (
     product_id      bigint generated always as identity primary key,
     product_code    varchar(64) not null,
     product_name    text not null,
+    unit_of_measure text not null default 'pcs',
+    is_active       boolean not null default true,
     unit            text not null,
     active          boolean not null default true,
     created_at      timestamptz not null default now(),
@@ -12,6 +14,7 @@ create table products (
     constraint uq_products_code unique (product_code),
     constraint chk_products_code_not_blank check (length(trim(product_code)) > 0),
     constraint chk_products_name_not_blank check (length(trim(product_name)) > 0),
+    constraint chk_products_unit_of_measure_not_blank check (length(trim(unit_of_measure)) > 0),
     constraint chk_products_unit_not_blank check (length(trim(unit)) > 0)
 );
 
@@ -54,4 +57,3 @@ create table machines (
     constraint chk_machine_code_not_blank check (length(trim(machine_code)) > 0),
     constraint chk_machine_name_not_blank check (length(trim(machine_name)) > 0)
 );
-

@@ -1,11 +1,11 @@
 -- Demo seed data for catalog tables
 
-insert into products (product_code, product_name, unit, active) values
-    ('P-BOARD-A1', 'Printed circuit board A1', 'pcs', true),
-    ('P-LAM-ROLL', 'Laminated film roll 500mm', 'roll', true),
-    ('P-LBL-PACK', 'Adhesive label pack 1000 pcs', 'pack', true),
-    ('P-CORE-SET', 'Paper core set 3 sizes', 'set', true),
-    ('P-BAG-ANTIST', 'Antistatic bag 30x40 cm', 'pcs', true);
+insert into products (product_code, product_name, unit, active, unit_of_measure, is_active) values
+    ('P-BOARD-A1', 'Printed circuit board A1', 'pcs', true, 'pcs', true),
+    ('P-LAM-ROLL', 'Laminated film roll 500mm', 'roll', true, 'roll', true),
+    ('P-LBL-PACK', 'Adhesive label pack 1000 pcs', 'pack', true, 'pack', true),
+    ('P-CORE-SET', 'Paper core set 3 sizes', 'set', true, 'set', true),
+    ('P-BAG-ANTIST', 'Antistatic bag 30x40 cm', 'pcs', true, 'pcs', true);
 
 insert into semi_finished (semi_finished_code, semi_finished_name, unit, degas_days, active) values
     ('SF-FILM-PET12', 'PET film 12um pretreated', 'kg', 0, true),
