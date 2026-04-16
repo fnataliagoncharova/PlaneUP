@@ -1,6 +1,7 @@
 ﻿import {
   Box,
   Layers,
+  Workflow,
   Route,
   BarChart3,
   ClipboardList,
@@ -58,7 +59,20 @@ const Sidebar = ({ collapsed, onToggleCollapsed, activeSection, onSectionChange 
           active={activeSection === "semi"}
           onClick={() => onSectionChange("semi")}
         />
-        <MenuItem icon={<Route />} label="Маршруты" collapsed={collapsed} />
+        <MenuItem
+          icon={<Workflow />}
+          label="Переделы"
+          collapsed={collapsed}
+          active={activeSection === "processes"}
+          onClick={() => onSectionChange("processes")}
+        />
+        <MenuItem
+          icon={<Route />}
+          label="Маршруты"
+          collapsed={collapsed}
+          active={activeSection === "routes"}
+          onClick={() => onSectionChange("routes")}
+        />
         <MenuItem icon={<BarChart3 />} label="План продаж" collapsed={collapsed} />
         <MenuItem icon={<ClipboardList />} label="Задания" collapsed={collapsed} />
         <MenuItem icon={<CheckCircle />} label="Факт" collapsed={collapsed} />

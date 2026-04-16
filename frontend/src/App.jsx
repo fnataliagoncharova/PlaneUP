@@ -2,6 +2,8 @@
 import Sidebar from "./components/Sidebar";
 import ProductsSection from "./sections/ProductsSection";
 import SemiFinishedSection from "./sections/SemiFinishedSection";
+import ProcessesSection from "./sections/ProcessesSection";
+import RoutesSection from "./sections/RoutesSection";
 import { styles } from "./styles";
 
 function App() {
@@ -12,6 +14,10 @@ function App() {
     document.title =
       activeSection === "semi"
         ? "Полуфабрикаты"
+        : activeSection === "processes"
+        ? "Переделы"
+        : activeSection === "routes"
+        ? "Маршруты"
         : "Номенклатура готовой продукции";
   }, [activeSection]);
 
@@ -27,6 +33,8 @@ function App() {
       <main style={styles.main}>
         {activeSection === "products" && <ProductsSection />}
         {activeSection === "semi" && <SemiFinishedSection />}
+        {activeSection === "processes" && <ProcessesSection />}
+        {activeSection === "routes" && <RoutesSection />}
       </main>
     </div>
   );

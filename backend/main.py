@@ -7,7 +7,9 @@ import datetime
 import io
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook, load_workbook
+from psycopg2 import IntegrityError, errorcodes
 import re
+ROUTE_STEP_DELETE_BLOCKED_MESSAGE = "Нельзя удалить шаг маршрута, так как для него уже заданы связанные данные."
 
 ALLOWED_UNITS = ["м²", "м.п."]
 
@@ -82,6 +84,39 @@ class SemiFinishedUpdate(BaseModel):
     is_active: Optional[bool] = None
     degas_days: Optional[int] = None
 
+
+class ProcessCreate(BaseModel):
+    process_code: str
+    process_name: str
+    is_active: Optional[bool] = True
+
+
+class ProcessUpdate(BaseModel):
+    process_code: Optional[str] = None
+    process_name: Optional[str] = None
+    is_active: Optional[bool] = None
+
+class RouteCreate(BaseModel):
+    route_code: str
+    route_name: str
+    is_active: Optional[bool] = True
+
+
+class RouteUpdate(BaseModel):
+    route_code: Optional[str] = None
+    route_name: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class RouteStepCreate(BaseModel):
+    process_id: int
+    notes: Optional[str] = None
+
+
+class RouteStepUpdate(BaseModel):
+    process_id: Optional[int] = None
+    notes: Optional[str] = None
+    step_no: Optional[int] = None
 
 app = FastAPI(title="PlaneUP API")
 
@@ -691,7 +726,7 @@ def get_routes():
     cur = conn.cursor()
 
     cur.execute("""
-        select route_id, route_code, route_name
+        select route_id, route_code, route_name, active
         from routes
         order by route_code
     """)
@@ -707,9 +742,478 @@ def get_routes():
             "route_id": row[0],
             "route_code": row[1],
             "route_name": row[2],
+            "is_active": bool(row[3]),
         })
 
     return result
+
+@app.get("/processes")
+def get_processes():
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        select process_id, process_code, process_name, active
+        from processes
+        order by process_code
+        """
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    return [
+        {
+            "process_id": row[0],
+            "process_code": row[1],
+            "process_name": row[2],
+            "is_active": bool(row[3]),
+        }
+        for row in rows
+    ]
+
+# Routes CRUD
+@app.post("/routes")
+def create_route(payload: RouteCreate):
+    code = (payload.route_code or "").strip()
+    name = (payload.route_name or "").strip()
+    active = bool(payload.is_active) if payload.is_active is not None else True
+
+    if not code:
+        raise HTTPException(status_code=400, detail="route_code is required")
+    if not name:
+        raise HTTPException(status_code=400, detail="route_name is required")
+
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("select route_id from routes where route_code = %s", (code,))
+        if cur.fetchone():
+            raise HTTPException(status_code=400, detail="route_code must be unique")
+
+        cur.execute(
+            """
+            insert into routes (route_code, route_name, active)
+            values (%s, %s, %s)
+            returning route_id, route_code, route_name, active
+            """,
+            (code, name, active),
+        )
+        new_row = cur.fetchone()
+        conn.commit()
+        return {
+            "route_id": new_row[0],
+            "route_code": new_row[1],
+            "route_name": new_row[2],
+            "is_active": bool(new_row[3]),
+        }
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.put("/routes/{route_id}")
+def update_route(route_id: int, payload: RouteUpdate):
+    update_fields = payload.dict(exclude_unset=True)
+    if not update_fields:
+        return {"status": "no_changes"}
+
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("select route_id, route_code from routes where route_id = %s", (route_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Route not found")
+
+        set_clauses = []
+        params = []
+
+        if "route_code" in update_fields:
+            new_code = (update_fields["route_code"] or "").strip()
+            if not new_code:
+                raise HTTPException(status_code=400, detail="route_code is required")
+            cur.execute(
+                "select 1 from routes where route_code = %s and route_id <> %s",
+                (new_code, route_id),
+            )
+            if cur.fetchone():
+                raise HTTPException(status_code=400, detail="route_code must be unique")
+            set_clauses.append("route_code = %s")
+            params.append(new_code)
+
+        if "route_name" in update_fields:
+            new_name = (update_fields["route_name"] or "").strip()
+            if not new_name:
+                raise HTTPException(status_code=400, detail="route_name is required")
+            set_clauses.append("route_name = %s")
+            params.append(new_name)
+
+        if "is_active" in update_fields:
+            set_clauses.append("active = %s")
+            params.append(update_fields["is_active"])
+
+        set_clauses.append("updated_at = now()")
+
+        sql = f"""
+            update routes
+            set {', '.join(set_clauses)}
+            where route_id = %s
+            returning route_id, route_code, route_name, active
+        """
+        params.append(route_id)
+        cur.execute(sql, tuple(params))
+        updated = cur.fetchone()
+        conn.commit()
+
+        return {
+            "route_id": updated[0],
+            "route_code": updated[1],
+            "route_name": updated[2],
+            "is_active": bool(updated[3]),
+        }
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.get("/routes/{route_id}/steps")
+def get_route_steps(route_id: int):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        select
+            rs.route_step_id,
+            rs.step_no,
+            rs.process_id,
+            p.process_code,
+            p.process_name,
+            coalesce(rs.notes, '')
+        from route_steps rs
+        join routes r on r.route_id = rs.route_id
+        join processes p on p.process_id = rs.process_id
+        where rs.route_id = %s
+        order by rs.step_no
+        """,
+        (route_id,),
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [
+        {
+            "route_step_id": r[0],
+            "step_no": r[1],
+            "process_id": r[2],
+            "process_code": r[3],
+            "process_name": r[4],
+            "notes": r[5],
+        }
+        for r in rows
+    ]
+
+
+@app.post("/routes/{route_id}/steps")
+def add_route_step(route_id: int, payload: RouteStepCreate):
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("select route_id from routes where route_id = %s", (route_id,))
+        if not cur.fetchone():
+            raise HTTPException(status_code=404, detail="Route not found")
+
+        # validate process
+        cur.execute("select process_id, process_code, process_name from processes where process_id = %s", (payload.process_id,))
+        proc_row = cur.fetchone()
+        if not proc_row:
+            raise HTTPException(status_code=400, detail="Unknown process_id")
+
+        cur.execute(
+            "select coalesce(max(step_no), 0) + 1 from route_steps where route_id = %s",
+            (route_id,),
+        )
+        next_no = cur.fetchone()[0]
+
+        cur.execute(
+            """
+            insert into route_steps (route_id, step_no, process_id, notes)
+            values (%s, %s, %s, %s)
+            returning route_step_id, step_no, process_id, notes
+            """,
+            (route_id, next_no, payload.process_id, payload.notes),
+        )
+        new_row = cur.fetchone()
+        conn.commit()
+
+        return {
+            "route_step_id": new_row[0],
+            "step_no": new_row[1],
+            "process_id": new_row[2],
+            "process_code": proc_row[1],
+            "process_name": proc_row[2],
+            "notes": new_row[3] or "",
+        }
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.put("/route-steps/{route_step_id}")
+def update_route_step(route_step_id: int, payload: RouteStepUpdate):
+    update_fields = payload.dict(exclude_unset=True)
+    if not update_fields:
+        return {"status": "no_changes"}
+
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "select route_id, step_no, process_id, notes from route_steps where route_step_id = %s",
+            (route_step_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Route step not found")
+        route_id, old_step_no, old_process_id, old_notes = row
+
+        # Validate process_id if provided
+        if "process_id" in update_fields:
+            cur.execute(
+                "select process_code, process_name from processes where process_id = %s",
+                (update_fields["process_id"],),
+            )
+            proc_row = cur.fetchone()
+            if not proc_row:
+                raise HTTPException(status_code=400, detail="Unknown process_id")
+        else:
+            cur.execute(
+                "select process_code, process_name from processes where process_id = %s",
+                (old_process_id,),
+            )
+            proc_row = cur.fetchone()
+
+        # Handle reordering if step_no changes
+        if "step_no" in update_fields and update_fields["step_no"] is not None:
+            new_no = int(update_fields["step_no"])
+            if new_no < 1:
+                raise HTTPException(status_code=400, detail="step_no must be >= 1")
+            if new_no != old_step_no:
+                if new_no < old_step_no:
+                    cur.execute(
+                        """
+                        update route_steps
+                        set step_no = step_no + 1
+                        where route_id = %s and step_no >= %s and step_no < %s and route_step_id <> %s
+                        """,
+                        (route_id, new_no, old_step_no, route_step_id),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        update route_steps
+                        set step_no = step_no - 1
+                        where route_id = %s and step_no <= %s and step_no > %s and route_step_id <> %s
+                        """,
+                        (route_id, new_no, old_step_no, route_step_id),
+                    )
+                old_step_no = new_no
+
+        # Build update
+        set_clauses = []
+        params = []
+
+        if "process_id" in update_fields:
+            set_clauses.append("process_id = %s")
+            params.append(update_fields["process_id"])
+
+        if "notes" in update_fields:
+            set_clauses.append("notes = %s")
+            params.append(update_fields["notes"])
+
+        if "step_no" in update_fields and update_fields["step_no"] is not None:
+            set_clauses.append("step_no = %s")
+            params.append(update_fields["step_no"])
+
+        if set_clauses:
+            cur.execute(
+                f"""
+                update route_steps
+                set {', '.join(set_clauses)}, updated_at = now()
+                where route_step_id = %s
+                returning route_step_id, step_no, process_id, notes
+                """,
+                tuple(params + [route_step_id]),
+            )
+            updated = cur.fetchone()
+        else:
+            updated = (route_step_id, old_step_no, old_process_id, old_notes)
+
+        conn.commit()
+
+        # process details
+        return {
+            "route_step_id": updated[0],
+            "step_no": updated[1],
+            "process_id": updated[2],
+            "process_code": proc_row[0],
+            "process_name": proc_row[1],
+            "notes": updated[3] or "",
+        }
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.delete("/route-steps/{route_step_id}")
+def delete_route_step(route_step_id: int):
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "select route_id, step_no from route_steps where route_step_id = %s",
+            (route_step_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Route step not found")
+        route_id, step_no = row
+
+        cur.execute(
+            "select 1 from route_step_material_flow where route_id = %s and step_no = %s limit 1",
+            (route_id, step_no),
+        )
+        if cur.fetchone():
+            raise HTTPException(status_code=400, detail=ROUTE_STEP_DELETE_BLOCKED_MESSAGE)
+
+        cur.execute(
+            "select 1 from production_orders where route_id = %s and step_no = %s limit 1",
+            (route_id, step_no),
+        )
+        if cur.fetchone():
+            raise HTTPException(status_code=400, detail=ROUTE_STEP_DELETE_BLOCKED_MESSAGE)
+
+        try:
+            cur.execute("delete from route_steps where route_step_id = %s", (route_step_id,))
+        except IntegrityError as exc:
+            conn.rollback()
+            if exc.pgcode == errorcodes.FOREIGN_KEY_VIOLATION:
+                raise HTTPException(status_code=400, detail=ROUTE_STEP_DELETE_BLOCKED_MESSAGE) from exc
+            raise
+
+        conn.commit()
+        return {"status": "deleted"}
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.post("/processes")
+def create_process(payload: ProcessCreate):
+    code = (payload.process_code or "").strip()
+    name = (payload.process_name or "").strip()
+    active = bool(payload.is_active) if payload.is_active is not None else True
+
+    if not code:
+        raise HTTPException(status_code=400, detail="process_code is required")
+    if not name:
+        raise HTTPException(status_code=400, detail="process_name is required")
+
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("select process_id from processes where process_code = %s", (code,))
+        if cur.fetchone():
+            raise HTTPException(status_code=400, detail="process_code must be unique")
+
+        cur.execute(
+            """
+            insert into processes (process_code, process_name, active)
+            values (%s, %s, %s)
+            returning process_id, process_code, process_name, active
+            """,
+            (code, name, active),
+        )
+        new_row = cur.fetchone()
+        conn.commit()
+        return {
+            "process_id": new_row[0],
+            "process_code": new_row[1],
+            "process_name": new_row[2],
+            "is_active": bool(new_row[3]),
+        }
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.put("/processes/{process_id}")
+def update_process(process_id: int, payload: ProcessUpdate):
+    update_fields = payload.dict(exclude_unset=True)
+    if not update_fields:
+        return {"status": "no_changes"}
+
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "select process_id, process_code from processes where process_id = %s",
+            (process_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Process not found")
+
+        set_clauses = []
+        params = []
+
+        if "process_code" in update_fields:
+            new_code = (update_fields["process_code"] or "").strip()
+            if not new_code:
+                raise HTTPException(status_code=400, detail="process_code is required")
+            cur.execute(
+                "select 1 from processes where process_code = %s and process_id <> %s",
+                (new_code, process_id),
+            )
+            if cur.fetchone():
+                raise HTTPException(status_code=400, detail="process_code must be unique")
+            set_clauses.append("process_code = %s")
+            params.append(new_code)
+
+        if "process_name" in update_fields:
+            new_name = (update_fields["process_name"] or "").strip()
+            if not new_name:
+                raise HTTPException(status_code=400, detail="process_name is required")
+            set_clauses.append("process_name = %s")
+            params.append(new_name)
+
+        if "is_active" in update_fields:
+            set_clauses.append("active = %s")
+            params.append(update_fields["is_active"])
+
+        set_clauses.append("updated_at = now()")
+
+        sql = f"""
+            update processes
+            set {', '.join(set_clauses)}
+            where process_id = %s
+            returning process_id, process_code, process_name, active
+        """
+        params.append(process_id)
+        cur.execute(sql, tuple(params))
+        updated = cur.fetchone()
+        conn.commit()
+
+        return {
+            "process_id": updated[0],
+            "process_code": updated[1],
+            "process_name": updated[2],
+            "is_active": bool(updated[3]),
+        }
+    finally:
+        cur.close()
+        conn.close()
 
 @app.get("/sales-plan")
 def get_sales_plan():
