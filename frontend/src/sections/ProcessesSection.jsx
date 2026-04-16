@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import DetailField from "../components/DetailField";
 import { styles } from "../styles";
+import { apiUrl } from "../config/api";
 
 const ProcessesSection = () => {
   const [items, setItems] = useState([]);
@@ -26,7 +27,7 @@ const ProcessesSection = () => {
     setLoading(true);
     setError("");
     try {
-      const resp = await fetch("http://127.0.0.1:8000/processes");
+      const resp = await fetch(apiUrl("/processes"));
       if (!resp.ok) throw new Error("Ошибка загрузки переделов");
       const data = await resp.json();
       setItems(data);
@@ -145,7 +146,7 @@ const ProcessesSection = () => {
     try {
       let resp;
       if (isNew) {
-        resp = await fetch("http://127.0.0.1:8000/processes", {
+        resp = await fetch(apiUrl("/processes"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -163,7 +164,7 @@ const ProcessesSection = () => {
           return;
         }
         resp = await fetch(
-          `http://127.0.0.1:8000/processes/${selected.process_id}`,
+          apiUrl(`/processes/${selected.process_id}`),
           {
             method: "PUT",
             headers: { "Content-Type": "application/json" },

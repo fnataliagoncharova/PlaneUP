@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import DetailField from "../components/DetailField";
 import { styles } from "../styles";
+import { apiUrl } from "../config/api";
 
 const getResponseErrorMessage = async (resp, fallback) => {
   const raw = (await resp.text()).trim();
@@ -58,7 +59,7 @@ const RoutesSection = () => {
 
   const loadProcesses = useCallback(async () => {
     try {
-      const resp = await fetch("http://127.0.0.1:8000/processes");
+      const resp = await fetch(apiUrl("/processes"));
       if (!resp.ok) throw new Error("Ошибка загрузки переделов");
       const data = await resp.json();
       setProcesses(data.filter((p) => p.is_active));
@@ -71,7 +72,7 @@ const RoutesSection = () => {
     setRoutesLoading(true);
     setRoutesError("");
     try {
-      const resp = await fetch("http://127.0.0.1:8000/routes");
+      const resp = await fetch(apiUrl("/routes"));
       if (!resp.ok) throw new Error("Ошибка загрузки маршрутов");
       const data = await resp.json();
       setRoutes(data);
@@ -100,7 +101,7 @@ const RoutesSection = () => {
     setStepsLoading(true);
     setStepsError("");
     try {
-      const resp = await fetch(`http://127.0.0.1:8000/routes/${routeId}/steps`);
+      const resp = await fetch(apiUrl(`/routes/${routeId}/steps`));
       if (!resp.ok) throw new Error("Ошибка загрузки шагов");
       const data = await resp.json();
       setSteps(data);
@@ -219,7 +220,7 @@ const RoutesSection = () => {
     try {
       let resp;
       if (isNewRoute) {
-        resp = await fetch("http://127.0.0.1:8000/routes", {
+        resp = await fetch(apiUrl("/routes"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -235,7 +236,7 @@ const RoutesSection = () => {
           setSaveRouteState({ saving: false, success: "Нет изменений", error: "" });
           return;
         }
-        resp = await fetch(`http://127.0.0.1:8000/routes/${selectedRouteId}`, {
+        resp = await fetch(apiUrl(`/routes/${selectedRouteId}`), {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(delta),
@@ -301,7 +302,7 @@ const RoutesSection = () => {
 
     setSaveStepState({ saving: true, success: "", error: "" });
     try {
-      const resp = await fetch(`http://127.0.0.1:8000/routes/${selectedRouteId}/steps`, {
+      const resp = await fetch(apiUrl(`/routes/${selectedRouteId}/steps`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ process_id: processId, notes: stepForm.notes }),
@@ -346,7 +347,7 @@ const RoutesSection = () => {
     setSaveStepState({ saving: true, success: "", error: "" });
     try {
       const resp = await fetch(
-        `http://127.0.0.1:8000/route-steps/${selectedStep.route_step_id}`,
+        apiUrl(`/route-steps/${selectedStep.route_step_id}`),
         {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
@@ -375,7 +376,7 @@ const RoutesSection = () => {
 
     try {
       const resp = await fetch(
-        `http://127.0.0.1:8000/route-steps/${selectedStep.route_step_id}`,
+        apiUrl(`/route-steps/${selectedStep.route_step_id}`),
         { method: "DELETE" }
       );
       if (!resp.ok) {

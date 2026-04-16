@@ -1,6 +1,7 @@
 ﻿import { useEffect, useState, useCallback, useRef } from "react";
 import DetailField from "../components/DetailField";
 import { styles } from "../styles";
+import { apiUrl } from "../config/api";
 
 const UNIT_OPTIONS = ["м²", "м.п."];
 
@@ -38,7 +39,7 @@ const SemiFinishedSection = () => {
     setSemiLoading(true);
     setSemiError("");
     try {
-      const response = await fetch("http://127.0.0.1:8000/semi-finished");
+      const response = await fetch(apiUrl("/semi-finished"));
       if (!response.ok) {
         throw new Error("Ошибка загрузки полуфабрикатов");
       }
@@ -143,7 +144,7 @@ const SemiFinishedSection = () => {
     setSaveState({ saving: true, success: "", error: "" });
     try {
       const resp = await fetch(
-        `http://127.0.0.1:8000/semi-finished/${selectedSemi.semi_finished_code}`,
+        apiUrl(`/semi-finished/${selectedSemi.semi_finished_code}`),
         {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
@@ -193,7 +194,7 @@ const SemiFinishedSection = () => {
               onClick={async () => {
                 try {
                   const resp = await fetch(
-                    "http://127.0.0.1:8000/semi-finished/import-template"
+                    apiUrl("/semi-finished/import-template")
                   );
                   if (!resp.ok) throw new Error("Ошибка скачивания шаблона");
                   const blob = await resp.blob();
@@ -232,7 +233,7 @@ const SemiFinishedSection = () => {
                 formData.append("file", file);
                 try {
                   const resp = await fetch(
-                    "http://127.0.0.1:8000/semi-finished/import",
+                    apiUrl("/semi-finished/import"),
                     {
                       method: "POST",
                       body: formData,

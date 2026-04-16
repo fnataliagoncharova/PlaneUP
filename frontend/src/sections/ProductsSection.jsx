@@ -1,6 +1,7 @@
 ﻿import { useEffect, useState, useRef, useCallback } from "react";
 import DetailField from "../components/DetailField";
 import { styles } from "../styles";
+import { apiUrl } from "../config/api";
 
 const UNIT_OPTIONS = ["м²", "м.п."];
 
@@ -41,7 +42,7 @@ const ProductsSection = () => {
     setLoading(true);
     setError("");
     try {
-      const response = await fetch("http://127.0.0.1:8000/products");
+      const response = await fetch(apiUrl("/products"));
       if (!response.ok) {
         throw new Error("Ошибка загрузки продукции");
       }
@@ -114,7 +115,7 @@ const ProductsSection = () => {
     setRelationsError("");
     setRelations([]);
     fetch(
-      `http://127.0.0.1:8000/products/${selectedProduct.product_code}/structure`
+      apiUrl(`/products/${selectedProduct.product_code}/structure`)
     )
       .then((response) => {
         if (!response.ok) {
@@ -152,7 +153,7 @@ const ProductsSection = () => {
               onClick={async () => {
                 try {
                   const resp = await fetch(
-                    "http://127.0.0.1:8000/products/import-template"
+                    apiUrl("/products/import-template")
                   );
                   if (!resp.ok) throw new Error("Ошибка скачивания шаблона");
                   const blob = await resp.blob();
@@ -193,7 +194,7 @@ const ProductsSection = () => {
                 formData.append("file", file);
                 try {
                   const resp = await fetch(
-                    "http://127.0.0.1:8000/products/import",
+                    apiUrl("/products/import"),
                     {
                       method: "POST",
                       body: formData,
@@ -395,7 +396,7 @@ const ProductsSection = () => {
                             setSaveState({ saving: true, success: "", error: "" });
                             try {
                               const resp = await fetch(
-                                `http://127.0.0.1:8000/products/${selectedProduct.product_code}`,
+                                apiUrl(`/products/${selectedProduct.product_code}`),
                                 {
                                   method: "PUT",
                                   headers: { "Content-Type": "application/json" },
