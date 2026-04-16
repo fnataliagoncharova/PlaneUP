@@ -129,7 +129,7 @@ def get_products_import_template():
     ws.title = "products"
     headers = ["product_code", "product_name", "unit_of_measure", "is_active"]
     ws.append(headers)
-    ws.append(["P-EXAMPLE", "РџСЂРёРјРµСЂ РїСЂРѕРґСѓРєС†РёРё", ALLOWED_UNITS[0], "Р”Р°"])
+    ws.append(["P-EXAMPLE", "Пример продукции", ALLOWED_UNITS[0], "Да"])
 
     stream = io.BytesIO()
     wb.save(stream)
@@ -144,22 +144,22 @@ def get_products_import_template():
 @router.post("/products/import")
 def import_products(file: UploadFile = File(...)):
     if not file.filename.lower().endswith(".xlsx"):
-        raise HTTPException(status_code=400, detail="РўСЂРµР±СѓРµС‚СЃСЏ С„Р°Р№Р» .xlsx")
+        raise HTTPException(status_code=400, detail="Требуется файл .xlsx")
 
     try:
         wb = load_workbook(file.file)
     except Exception:
-        raise HTTPException(status_code=400, detail="РќРµ СѓРґР°Р»РѕСЃСЊ РїСЂРѕС‡РёС‚Р°С‚СЊ Excel-С„Р°Р№Р»")
+        raise HTTPException(status_code=400, detail="Не удалось прочитать Excel-файл")
 
     ws = wb.active
     rows = list(ws.iter_rows(values_only=True))
     if not rows or len(rows) < 2:
-        raise HTTPException(status_code=400, detail="Р¤Р°Р№Р» РЅРµ СЃРѕРґРµСЂР¶РёС‚ РґР°РЅРЅС‹С…")
+        raise HTTPException(status_code=400, detail="Файл не содержит данных")
 
     header = [str(h).strip() if h else "" for h in rows[0]]
     expected_header = ["product_code", "product_name", "unit_of_measure", "is_active"]
     if [h.lower() for h in header] != expected_header:
-        raise HTTPException(status_code=400, detail="РќРµРІРµСЂРЅС‹Р№ Р·Р°РіРѕР»РѕРІРѕРє С„Р°Р№Р»Р°")
+        raise HTTPException(status_code=400, detail="Неверный заголовок файла")
 
     seen_codes = set()
     items = []
@@ -171,9 +171,9 @@ def import_products(file: UploadFile = File(...)):
         if isinstance(val, bool):
             return val
         s = str(val).strip().lower()
-        if s in ["РґР°", "yes", "true", "1"]:
+        if s in ["да", "yes", "true", "1"]:
             return True
-        if s in ["РЅРµС‚", "no", "false", "0"]:
+        if s in ["нет", "no", "false", "0"]:
             return False
         return None
 
@@ -196,15 +196,15 @@ def import_products(file: UploadFile = File(...)):
         active_val = normalize_bool(is_active_raw)
 
         if not code:
-            row_errors.append("РЅРµ Р·Р°РїРѕР»РЅРµРЅ product_code")
+            row_errors.append("не заполнен product_code")
         if code in seen_codes:
-            row_errors.append("РґСѓР±Р»РёСЂСѓСЋС‰РёР№СЃСЏ product_code РІ С„Р°Р№Р»Рµ")
+            row_errors.append("дублирующийся product_code в файле")
         if not name:
-            row_errors.append("РЅРµ Р·Р°РїРѕР»РЅРµРЅ product_name")
+            row_errors.append("не заполнен product_name")
         if unit is None:
-            row_errors.append("РЅРµРґРѕРїСѓСЃС‚РёРјР°СЏ РµРґРёРЅРёС†Р° РёР·РјРµСЂРµРЅРёСЏ (СЂР°Р·СЂРµС€РµРЅРѕ: РјВІ РёР»Рё Рј.Рї.)")
+            row_errors.append("недопустимая единица измерения (разрешено: м² или м.п.)")
         if active_val is None:
-            row_errors.append("РЅРµРґРѕРїСѓСЃС‚РёРјРѕРµ Р·РЅР°С‡РµРЅРёРµ is_active (РёСЃРїРѕР»СЊР·СѓР№С‚Рµ Р”Р°/РќРµС‚)")
+            row_errors.append("недопустимое значение is_active (используйте Да/Нет)")
 
         if row_errors:
             errors.append({"row": idx, "errors": row_errors})

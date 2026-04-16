@@ -61,7 +61,7 @@ def get_semi_finished_import_template():
     ws.title = "semi_finished"
     headers = ["semi_finished_code", "semi_finished_name", "unit_of_measure", "degas_days", "is_active"]
     ws.append(headers)
-    ws.append(["SF-EXAMPLE", "РџСЂРёРјРµСЂ РїРѕР»СѓС„Р°Р±СЂРёРєР°С‚Р°", ALLOWED_UNITS[0], 0, "Р”Р°"])
+    ws.append(["SF-EXAMPLE", "Пример полуфабриката", ALLOWED_UNITS[0], 0, "Да"])
 
     stream = io.BytesIO()
     wb.save(stream)
@@ -76,22 +76,22 @@ def get_semi_finished_import_template():
 @router.post("/semi-finished/import")
 def import_semi_finished(file: UploadFile = File(...)):
     if not file.filename.lower().endswith(".xlsx"):
-        raise HTTPException(status_code=400, detail="РўСЂРµР±СѓРµС‚СЃСЏ С„Р°Р№Р» .xlsx")
+        raise HTTPException(status_code=400, detail="Требуется файл .xlsx")
 
     try:
         wb = load_workbook(file.file)
     except Exception:
-        raise HTTPException(status_code=400, detail="РќРµ СѓРґР°Р»РѕСЃСЊ РїСЂРѕС‡РёС‚Р°С‚СЊ Excel-С„Р°Р№Р»")
+        raise HTTPException(status_code=400, detail="Не удалось прочитать Excel-файл")
 
     ws = wb.active
     rows = list(ws.iter_rows(values_only=True))
     if not rows or len(rows) < 2:
-        raise HTTPException(status_code=400, detail="Р¤Р°Р№Р» РЅРµ СЃРѕРґРµСЂР¶РёС‚ РґР°РЅРЅС‹С…")
+        raise HTTPException(status_code=400, detail="Файл не содержит данных")
 
     header = [str(h).strip() if h else "" for h in rows[0]]
     expected_header = ["semi_finished_code", "semi_finished_name", "unit_of_measure", "degas_days", "is_active"]
     if [h.lower() for h in header] != expected_header:
-        raise HTTPException(status_code=400, detail="РќРµРІРµСЂРЅС‹Р№ Р·Р°РіРѕР»РѕРІРѕРє С„Р°Р№Р»Р°")
+        raise HTTPException(status_code=400, detail="Неверный заголовок файла")
 
     seen_codes = set()
     items = []
@@ -103,9 +103,9 @@ def import_semi_finished(file: UploadFile = File(...)):
         if isinstance(val, bool):
             return val
         s = str(val).strip().lower()
-        if s in ["РґР°", "yes", "true", "1"]:
+        if s in ["да", "yes", "true", "1"]:
             return True
-        if s in ["РЅРµС‚", "no", "false", "0"]:
+        if s in ["нет", "no", "false", "0"]:
             return False
         return None
 
@@ -135,20 +135,20 @@ def import_semi_finished(file: UploadFile = File(...)):
                 if degas_days < 0:
                     raise ValueError()
             except Exception:
-                row_errors.append("degas_days РґРѕР»Р¶РµРЅ Р±С‹С‚СЊ РЅРµРѕС‚СЂРёС†Р°С‚РµР»СЊРЅС‹Рј С†РµР»С‹Рј")
+                row_errors.append("degas_days должен быть неотрицательным целым")
 
         active = normalize_bool(active_raw)
 
         if not code:
-            row_errors.append("РЅРµ Р·Р°РїРѕР»РЅРµРЅ semi_finished_code")
+            row_errors.append("не заполнен semi_finished_code")
         if code in seen_codes:
-            row_errors.append("РґСѓР±Р»РёСЂСѓСЋС‰РёР№СЃСЏ semi_finished_code РІ С„Р°Р№Р»Рµ")
+            row_errors.append("дублирующийся semi_finished_code в файле")
         if not name:
-            row_errors.append("РЅРµ Р·Р°РїРѕР»РЅРµРЅ semi_finished_name")
+            row_errors.append("не заполнен semi_finished_name")
         if unit is None:
-            row_errors.append("РЅРµРґРѕРїСѓСЃС‚РёРјР°СЏ РµРґРёРЅРёС†Р° РёР·РјРµСЂРµРЅРёСЏ (СЂР°Р·СЂРµС€РµРЅРѕ: РјВІ РёР»Рё Рј.Рї.)")
+            row_errors.append("недопустимая единица измерения (разрешено: м² или м.п.)")
         if active is None:
-            row_errors.append("РЅРµРґРѕРїСѓСЃС‚РёРјРѕРµ Р·РЅР°С‡РµРЅРёРµ is_active (РёСЃРїРѕР»СЊР·СѓР№С‚Рµ Р”Р°/РќРµС‚)")
+            row_errors.append("недопустимое значение is_active (используйте Да/Нет)")
 
         if row_errors:
             errors.append({"row": idx, "errors": row_errors})
@@ -244,7 +244,7 @@ def update_semi_finished(semi_finished_code: str, payload: SemiFinishedUpdate):
             if update_fields["degas_days"] < 0:
                 raise ValueError()
         except Exception:
-            raise HTTPException(status_code=400, detail="РќРµРґРѕРїСѓСЃС‚РёРјРѕРµ Р·РЅР°С‡РµРЅРёРµ degas_days (С†РµР»РѕРµ РЅРµРѕС‚СЂРёС†Р°С‚РµР»СЊРЅРѕРµ)")
+            raise HTTPException(status_code=400, detail="Недопустимое значение degas_days (целое неотрицательное)")
 
     conn = get_connection()
     cur = conn.cursor()
