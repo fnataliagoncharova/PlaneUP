@@ -2,53 +2,51 @@ import io
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
-from openpyxl import Workbook, load_workbook
+from openpyxl import Workbook
 
 from constants import ALLOWED_UNITS
-from database import get_connection
 from schemas.products import ProductUpdate
+from utils.db import db_cursor
+from utils.excel import (
+    build_import_response,
+    is_blank_excel_row,
+    normalize_excel_bool,
+    read_excel_rows,
+)
 from utils.units import normalize_unit
 
 
 router = APIRouter()
 
 
+def _serialize_product(row):
+    return {
+        "product_id": row[0],
+        "product_code": row[1],
+        "product_name": row[2],
+        "unit_of_measure": row[3],
+        "is_active": bool(row[4]),
+    }
+
+
 @router.get("/products")
 def get_products():
-    conn = get_connection()
-    cur = conn.cursor()
-
-    cur.execute(
-        """
-        select
-            product_id,
-            product_code,
-            product_name,
-            coalesce(unit_of_measure, unit) as unit_of_measure,
-            coalesce(is_active, active, true) as is_active
-        from products
-        order by product_code
-    """
-    )
-
-    rows = cur.fetchall()
-
-    cur.close()
-    conn.close()
-
-    result = []
-    for row in rows:
-        result.append(
-            {
-                "product_id": row[0],
-                "product_code": row[1],
-                "product_name": row[2],
-                "unit_of_measure": row[3],
-                "is_active": bool(row[4]),
-            }
+    with db_cursor() as (_, cur):
+        cur.execute(
+            """
+            select
+                product_id,
+                product_code,
+                product_name,
+                coalesce(unit_of_measure, unit) as unit_of_measure,
+                coalesce(is_active, active, true) as is_active
+            from products
+            order by product_code
+            """
         )
+        rows = cur.fetchall()
 
-    return result
+    return [_serialize_product(row) for row in rows]
 
 
 @router.put("/products/{product_code}")
@@ -57,9 +55,7 @@ def update_product(product_code: str, payload: ProductUpdate):
     if not update_fields:
         return {"status": "no_changes"}
 
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
+    with db_cursor() as (conn, cur):
         cur.execute(
             "select product_id from products where product_code = %s",
             (product_code,),
@@ -110,16 +106,7 @@ def update_product(product_code: str, payload: ProductUpdate):
         updated = cur.fetchone()
         conn.commit()
 
-        return {
-            "product_id": updated[0],
-            "product_code": updated[1],
-            "product_name": updated[2],
-            "unit_of_measure": updated[3],
-            "is_active": bool(updated[4]),
-        }
-    finally:
-        cur.close()
-        conn.close()
+        return _serialize_product(updated)
 
 
 @router.get("/products/import-template")
@@ -143,47 +130,17 @@ def get_products_import_template():
 
 @router.post("/products/import")
 def import_products(file: UploadFile = File(...)):
-    if not file.filename.lower().endswith(".xlsx"):
-        raise HTTPException(status_code=400, detail="Требуется файл .xlsx")
-
-    try:
-        wb = load_workbook(file.file)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Не удалось прочитать Excel-файл")
-
-    ws = wb.active
-    rows = list(ws.iter_rows(values_only=True))
-    if not rows or len(rows) < 2:
-        raise HTTPException(status_code=400, detail="Файл не содержит данных")
-
-    header = [str(h).strip() if h else "" for h in rows[0]]
     expected_header = ["product_code", "product_name", "unit_of_measure", "is_active"]
-    if [h.lower() for h in header] != expected_header:
-        raise HTTPException(status_code=400, detail="Неверный заголовок файла")
+    rows = read_excel_rows(file, expected_header)
 
     seen_codes = set()
     items = []
     errors = []
 
-    def normalize_bool(val):
-        if val is None:
-            return None
-        if isinstance(val, bool):
-            return val
-        s = str(val).strip().lower()
-        if s in ["да", "yes", "true", "1"]:
-            return True
-        if s in ["нет", "no", "false", "0"]:
-            return False
-        return None
-
     for idx, row in enumerate(rows[1:], start=2):
         product_code, product_name, unit_of_measure, is_active_raw = row[:4]
 
-        if all(
-            (cell is None or (isinstance(cell, str) and cell.strip() == ""))
-            for cell in (product_code, product_name, unit_of_measure, is_active_raw)
-        ):
+        if is_blank_excel_row((product_code, product_name, unit_of_measure, is_active_raw)):
             continue
         row_errors = []
 
@@ -193,7 +150,7 @@ def import_products(file: UploadFile = File(...)):
             unit = normalize_unit(unit_of_measure)
         except HTTPException:
             unit = None
-        active_val = normalize_bool(is_active_raw)
+        active_val = normalize_excel_bool(is_active_raw)
 
         if not code:
             row_errors.append("не заполнен product_code")
@@ -223,9 +180,7 @@ def import_products(file: UploadFile = File(...)):
     updated = 0
 
     if items:
-        conn = get_connection()
-        cur = conn.cursor()
-        try:
+        with db_cursor() as (conn, cur):
             for item in items:
                 cur.execute(
                     "select product_id from products where product_code = %s",
@@ -272,53 +227,43 @@ def import_products(file: UploadFile = File(...)):
                     )
                     created += 1
             conn.commit()
-        finally:
-            cur.close()
-            conn.close()
 
-    return {
-        "processed": len(items),
-        "created_count": created,
-        "updated_count": updated,
-        "error_count": len(errors),
-        "errors": errors,
-    }
+    return build_import_response(
+        processed_count=len(items),
+        created_count=created,
+        updated_count=updated,
+        errors=errors,
+    )
 
 
 @router.get("/products/{product_code}/structure")
 def get_product_structure(product_code: str):
-    conn = get_connection()
-    cur = conn.cursor()
-
-    cur.execute(
-        """
-        select
-            p.product_code,
-            p.product_name,
-            sf.semi_finished_code,
-            sf.semi_finished_name,
-            c.component_qty,
-            c.product_qty,
-            c.priority,
-            r.route_code,
-            r.route_name
-        from products p
-        join product_semi_finished_components c
-            on c.product_id = p.product_id
-        join semi_finished sf
-            on sf.semi_finished_id = c.semi_finished_id
-        join routes r
-            on r.route_id = c.route_id
-        where p.product_code = %s
-        order by c.priority
-    """,
-        (product_code,),
-    )
-
-    rows = cur.fetchall()
-
-    cur.close()
-    conn.close()
+    with db_cursor() as (_, cur):
+        cur.execute(
+            """
+            select
+                p.product_code,
+                p.product_name,
+                sf.semi_finished_code,
+                sf.semi_finished_name,
+                c.component_qty,
+                c.product_qty,
+                c.priority,
+                r.route_code,
+                r.route_name
+            from products p
+            join product_semi_finished_components c
+                on c.product_id = p.product_id
+            join semi_finished sf
+                on sf.semi_finished_id = c.semi_finished_id
+            join routes r
+                on r.route_id = c.route_id
+            where p.product_code = %s
+            order by c.priority
+            """,
+            (product_code,),
+        )
+        rows = cur.fetchall()
 
     if not rows:
         return {"error": "Product not found"}
@@ -347,42 +292,37 @@ def get_product_structure(product_code: str):
 
 @router.get("/products/{product_code}/needs")
 def get_product_needs(product_code: str):
-    conn = get_connection()
-    cur = conn.cursor()
+    with db_cursor() as (_, cur):
+        cur.execute(
+            """
+            select
+                pn.period,
+                pn.required_qty
+            from production_need pn
+            join products p on p.product_id = pn.product_id
+            where p.product_code = %s
+            """,
+            (product_code,),
+        )
 
-    cur.execute(
-        """
-        select
-            pn.period,
-            pn.required_qty
-        from production_need pn
-        join products p on p.product_id = pn.product_id
-        where p.product_code = %s
-    """,
-        (product_code,),
-    )
+        prod_need_row = cur.fetchone()
 
-    prod_need_row = cur.fetchone()
+        cur.execute(
+            """
+            select
+                sf.semi_finished_code,
+                sf.semi_finished_name,
+                sfn.required_semi_finished_qty
+            from semi_finished_need sfn
+            join products p on p.product_id = sfn.source_product_id
+            join semi_finished sf on sf.semi_finished_id = sfn.semi_finished_id
+            where p.product_code = %s
+            order by sf.semi_finished_code
+            """,
+            (product_code,),
+        )
 
-    cur.execute(
-        """
-        select
-            sf.semi_finished_code,
-            sf.semi_finished_name,
-            sfn.required_semi_finished_qty
-        from semi_finished_need sfn
-        join products p on p.product_id = sfn.source_product_id
-        join semi_finished sf on sf.semi_finished_id = sfn.semi_finished_id
-        where p.product_code = %s
-        order by sf.semi_finished_code
-    """,
-        (product_code,),
-    )
-
-    sf_rows = cur.fetchall()
-
-    cur.close()
-    conn.close()
+        sf_rows = cur.fetchall()
 
     if not prod_need_row:
         return {"error": "Product not found or no needs"}
@@ -407,35 +347,30 @@ def get_product_needs(product_code: str):
 
 @router.get("/products/{product_code}/orders")
 def get_product_orders(product_code: str):
-    conn = get_connection()
-    cur = conn.cursor()
+    with db_cursor() as (_, cur):
+        cur.execute(
+            """
+            select
+                po.order_id,
+                r.route_code,
+                r.route_name,
+                po.step_no,
+                sf.semi_finished_code,
+                sf.semi_finished_name,
+                po.planned_qty,
+                po.status
+            from production_orders po
+            join routes r on r.route_id = po.route_id
+            join semi_finished sf on sf.semi_finished_id = po.output_semi_finished_id
+            join semi_finished_need sfn on sfn.semi_finished_need_id = po.source_need_id
+            join products p on p.product_id = sfn.source_product_id
+            where p.product_code = %s
+            order by po.order_id
+            """,
+            (product_code,),
+        )
 
-    cur.execute(
-        """
-        select
-            po.order_id,
-            r.route_code,
-            r.route_name,
-            po.step_no,
-            sf.semi_finished_code,
-            sf.semi_finished_name,
-            po.planned_qty,
-            po.status
-        from production_orders po
-        join routes r on r.route_id = po.route_id
-        join semi_finished sf on sf.semi_finished_id = po.output_semi_finished_id
-        join semi_finished_need sfn on sfn.semi_finished_need_id = po.source_need_id
-        join products p on p.product_id = sfn.source_product_id
-        where p.product_code = %s
-        order by po.order_id
-    """,
-        (product_code,),
-    )
-
-    rows = cur.fetchall()
-
-    cur.close()
-    conn.close()
+        rows = cur.fetchall()
 
     if not rows:
         return {"error": "Product not found or no orders"}
@@ -461,37 +396,32 @@ def get_product_orders(product_code: str):
 
 @router.get("/products/{product_code}/actuals")
 def get_product_actuals(product_code: str):
-    conn = get_connection()
-    cur = conn.cursor()
+    with db_cursor() as (_, cur):
+        cur.execute(
+            """
+            select
+                pa.actual_id,
+                r.route_code,
+                po.step_no,
+                sf.semi_finished_code,
+                sf.semi_finished_name,
+                pa.fact_qty,
+                pa.scrap_qty,
+                pa.fact_start,
+                pa.fact_finish
+            from production_actuals pa
+            join production_orders po on po.order_id = pa.order_id
+            join routes r on r.route_id = po.route_id
+            join semi_finished sf on sf.semi_finished_id = po.output_semi_finished_id
+            join semi_finished_need sfn on sfn.semi_finished_need_id = po.source_need_id
+            join products p on p.product_id = sfn.source_product_id
+            where p.product_code = %s
+            order by pa.actual_id
+            """,
+            (product_code,),
+        )
 
-    cur.execute(
-        """
-        select
-            pa.actual_id,
-            r.route_code,
-            po.step_no,
-            sf.semi_finished_code,
-            sf.semi_finished_name,
-            pa.fact_qty,
-            pa.scrap_qty,
-            pa.fact_start,
-            pa.fact_finish
-        from production_actuals pa
-        join production_orders po on po.order_id = pa.order_id
-        join routes r on r.route_id = po.route_id
-        join semi_finished sf on sf.semi_finished_id = po.output_semi_finished_id
-        join semi_finished_need sfn on sfn.semi_finished_need_id = po.source_need_id
-        join products p on p.product_id = sfn.source_product_id
-        where p.product_code = %s
-        order by pa.actual_id
-    """,
-        (product_code,),
-    )
-
-    rows = cur.fetchall()
-
-    cur.close()
-    conn.close()
+        rows = cur.fetchall()
 
     result = {"product_code": product_code, "actuals": []}
 

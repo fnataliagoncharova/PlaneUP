@@ -1,53 +1,44 @@
 from fastapi import APIRouter, HTTPException
 
-from database import get_connection
 from schemas.processes import ProcessCreate, ProcessUpdate
+from utils.db import db_cursor
+from utils.validation import bool_or_default, require_non_empty_string
 
 
 router = APIRouter()
 
 
+def _serialize_process(row):
+    return {
+        "process_id": row[0],
+        "process_code": row[1],
+        "process_name": row[2],
+        "is_active": bool(row[3]),
+    }
+
+
 @router.get("/processes")
 def get_processes():
-    conn = get_connection()
-    cur = conn.cursor()
+    with db_cursor() as (_, cur):
+        cur.execute(
+            """
+            select process_id, process_code, process_name, active
+            from processes
+            order by process_code
+            """
+        )
+        rows = cur.fetchall()
 
-    cur.execute(
-        """
-        select process_id, process_code, process_name, active
-        from processes
-        order by process_code
-        """
-    )
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-
-    return [
-        {
-            "process_id": row[0],
-            "process_code": row[1],
-            "process_name": row[2],
-            "is_active": bool(row[3]),
-        }
-        for row in rows
-    ]
+    return [_serialize_process(row) for row in rows]
 
 
 @router.post("/processes")
 def create_process(payload: ProcessCreate):
-    code = (payload.process_code or "").strip()
-    name = (payload.process_name or "").strip()
-    active = bool(payload.is_active) if payload.is_active is not None else True
+    code = require_non_empty_string(payload.process_code, "process_code is required")
+    name = require_non_empty_string(payload.process_name, "process_name is required")
+    active = bool_or_default(payload.is_active, default=True)
 
-    if not code:
-        raise HTTPException(status_code=400, detail="process_code is required")
-    if not name:
-        raise HTTPException(status_code=400, detail="process_name is required")
-
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
+    with db_cursor() as (conn, cur):
         cur.execute("select process_id from processes where process_code = %s", (code,))
         if cur.fetchone():
             raise HTTPException(status_code=400, detail="process_code must be unique")
@@ -62,15 +53,7 @@ def create_process(payload: ProcessCreate):
         )
         new_row = cur.fetchone()
         conn.commit()
-        return {
-            "process_id": new_row[0],
-            "process_code": new_row[1],
-            "process_name": new_row[2],
-            "is_active": bool(new_row[3]),
-        }
-    finally:
-        cur.close()
-        conn.close()
+        return _serialize_process(new_row)
 
 
 @router.put("/processes/{process_id}")
@@ -79,9 +62,7 @@ def update_process(process_id: int, payload: ProcessUpdate):
     if not update_fields:
         return {"status": "no_changes"}
 
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
+    with db_cursor() as (conn, cur):
         cur.execute(
             "select process_id, process_code from processes where process_id = %s",
             (process_id,),
@@ -94,9 +75,10 @@ def update_process(process_id: int, payload: ProcessUpdate):
         params = []
 
         if "process_code" in update_fields:
-            new_code = (update_fields["process_code"] or "").strip()
-            if not new_code:
-                raise HTTPException(status_code=400, detail="process_code is required")
+            new_code = require_non_empty_string(
+                update_fields["process_code"],
+                "process_code is required",
+            )
             cur.execute(
                 "select 1 from processes where process_code = %s and process_id <> %s",
                 (new_code, process_id),
@@ -107,9 +89,10 @@ def update_process(process_id: int, payload: ProcessUpdate):
             params.append(new_code)
 
         if "process_name" in update_fields:
-            new_name = (update_fields["process_name"] or "").strip()
-            if not new_name:
-                raise HTTPException(status_code=400, detail="process_name is required")
+            new_name = require_non_empty_string(
+                update_fields["process_name"],
+                "process_name is required",
+            )
             set_clauses.append("process_name = %s")
             params.append(new_name)
 
@@ -130,12 +113,4 @@ def update_process(process_id: int, payload: ProcessUpdate):
         updated = cur.fetchone()
         conn.commit()
 
-        return {
-            "process_id": updated[0],
-            "process_code": updated[1],
-            "process_name": updated[2],
-            "is_active": bool(updated[3]),
-        }
-    finally:
-        cur.close()
-        conn.close()
+        return _serialize_process(updated)

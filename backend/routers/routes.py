@@ -2,59 +2,63 @@ from fastapi import APIRouter, HTTPException
 from psycopg2 import IntegrityError, errorcodes
 
 from constants import ROUTE_STEP_DELETE_BLOCKED_MESSAGE
-from database import get_connection
 from schemas.routes import RouteCreate, RouteStepCreate, RouteStepUpdate, RouteUpdate
+from utils.db import db_cursor
+from utils.validation import bool_or_default, require_non_empty_string
 
 
 router = APIRouter()
 
 
+def _serialize_route(row):
+    return {
+        "route_id": row[0],
+        "route_code": row[1],
+        "route_name": row[2],
+        "is_active": bool(row[3]),
+    }
+
+
+def _serialize_route_step(
+    route_step_id: int,
+    step_no: int,
+    process_id: int,
+    process_code: str,
+    process_name: str,
+    notes,
+):
+    return {
+        "route_step_id": route_step_id,
+        "step_no": step_no,
+        "process_id": process_id,
+        "process_code": process_code,
+        "process_name": process_name,
+        "notes": notes or "",
+    }
+
+
 @router.get("/routes")
 def get_routes():
-    conn = get_connection()
-    cur = conn.cursor()
-
-    cur.execute(
-        """
-        select route_id, route_code, route_name, active
-        from routes
-        order by route_code
-    """
-    )
-
-    rows = cur.fetchall()
-
-    cur.close()
-    conn.close()
-
-    result = []
-    for row in rows:
-        result.append(
-            {
-                "route_id": row[0],
-                "route_code": row[1],
-                "route_name": row[2],
-                "is_active": bool(row[3]),
-            }
+    with db_cursor() as (_, cur):
+        cur.execute(
+            """
+            select route_id, route_code, route_name, active
+            from routes
+            order by route_code
+            """
         )
+        rows = cur.fetchall()
 
-    return result
+    return [_serialize_route(row) for row in rows]
 
 
 @router.post("/routes")
 def create_route(payload: RouteCreate):
-    code = (payload.route_code or "").strip()
-    name = (payload.route_name or "").strip()
-    active = bool(payload.is_active) if payload.is_active is not None else True
+    code = require_non_empty_string(payload.route_code, "route_code is required")
+    name = require_non_empty_string(payload.route_name, "route_name is required")
+    active = bool_or_default(payload.is_active, default=True)
 
-    if not code:
-        raise HTTPException(status_code=400, detail="route_code is required")
-    if not name:
-        raise HTTPException(status_code=400, detail="route_name is required")
-
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
+    with db_cursor() as (conn, cur):
         cur.execute("select route_id from routes where route_code = %s", (code,))
         if cur.fetchone():
             raise HTTPException(status_code=400, detail="route_code must be unique")
@@ -69,15 +73,7 @@ def create_route(payload: RouteCreate):
         )
         new_row = cur.fetchone()
         conn.commit()
-        return {
-            "route_id": new_row[0],
-            "route_code": new_row[1],
-            "route_name": new_row[2],
-            "is_active": bool(new_row[3]),
-        }
-    finally:
-        cur.close()
-        conn.close()
+        return _serialize_route(new_row)
 
 
 @router.put("/routes/{route_id}")
@@ -86,9 +82,7 @@ def update_route(route_id: int, payload: RouteUpdate):
     if not update_fields:
         return {"status": "no_changes"}
 
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
+    with db_cursor() as (conn, cur):
         cur.execute("select route_id, route_code from routes where route_id = %s", (route_id,))
         row = cur.fetchone()
         if not row:
@@ -98,9 +92,10 @@ def update_route(route_id: int, payload: RouteUpdate):
         params = []
 
         if "route_code" in update_fields:
-            new_code = (update_fields["route_code"] or "").strip()
-            if not new_code:
-                raise HTTPException(status_code=400, detail="route_code is required")
+            new_code = require_non_empty_string(
+                update_fields["route_code"],
+                "route_code is required",
+            )
             cur.execute(
                 "select 1 from routes where route_code = %s and route_id <> %s",
                 (new_code, route_id),
@@ -111,9 +106,10 @@ def update_route(route_id: int, payload: RouteUpdate):
             params.append(new_code)
 
         if "route_name" in update_fields:
-            new_name = (update_fields["route_name"] or "").strip()
-            if not new_name:
-                raise HTTPException(status_code=400, detail="route_name is required")
+            new_name = require_non_empty_string(
+                update_fields["route_name"],
+                "route_name is required",
+            )
             set_clauses.append("route_name = %s")
             params.append(new_name)
 
@@ -134,64 +130,55 @@ def update_route(route_id: int, payload: RouteUpdate):
         updated = cur.fetchone()
         conn.commit()
 
-        return {
-            "route_id": updated[0],
-            "route_code": updated[1],
-            "route_name": updated[2],
-            "is_active": bool(updated[3]),
-        }
-    finally:
-        cur.close()
-        conn.close()
+        return _serialize_route(updated)
 
 
 @router.get("/routes/{route_id}/steps")
 def get_route_steps(route_id: int):
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        select
-            rs.route_step_id,
-            rs.step_no,
-            rs.process_id,
-            p.process_code,
-            p.process_name,
-            coalesce(rs.notes, '')
-        from route_steps rs
-        join routes r on r.route_id = rs.route_id
-        join processes p on p.process_id = rs.process_id
-        where rs.route_id = %s
-        order by rs.step_no
-        """,
-        (route_id,),
-    )
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
+    with db_cursor() as (_, cur):
+        cur.execute(
+            """
+            select
+                rs.route_step_id,
+                rs.step_no,
+                rs.process_id,
+                p.process_code,
+                p.process_name,
+                coalesce(rs.notes, '')
+            from route_steps rs
+            join routes r on r.route_id = rs.route_id
+            join processes p on p.process_id = rs.process_id
+            where rs.route_id = %s
+            order by rs.step_no
+            """,
+            (route_id,),
+        )
+        rows = cur.fetchall()
+
     return [
-        {
-            "route_step_id": r[0],
-            "step_no": r[1],
-            "process_id": r[2],
-            "process_code": r[3],
-            "process_name": r[4],
-            "notes": r[5],
-        }
-        for r in rows
+        _serialize_route_step(
+            route_step_id=row[0],
+            step_no=row[1],
+            process_id=row[2],
+            process_code=row[3],
+            process_name=row[4],
+            notes=row[5],
+        )
+        for row in rows
     ]
 
 
 @router.post("/routes/{route_id}/steps")
 def add_route_step(route_id: int, payload: RouteStepCreate):
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
+    with db_cursor() as (conn, cur):
         cur.execute("select route_id from routes where route_id = %s", (route_id,))
         if not cur.fetchone():
             raise HTTPException(status_code=404, detail="Route not found")
 
-        cur.execute("select process_id, process_code, process_name from processes where process_id = %s", (payload.process_id,))
+        cur.execute(
+            "select process_id, process_code, process_name from processes where process_id = %s",
+            (payload.process_id,),
+        )
         proc_row = cur.fetchone()
         if not proc_row:
             raise HTTPException(status_code=400, detail="Unknown process_id")
@@ -213,17 +200,14 @@ def add_route_step(route_id: int, payload: RouteStepCreate):
         new_row = cur.fetchone()
         conn.commit()
 
-        return {
-            "route_step_id": new_row[0],
-            "step_no": new_row[1],
-            "process_id": new_row[2],
-            "process_code": proc_row[1],
-            "process_name": proc_row[2],
-            "notes": new_row[3] or "",
-        }
-    finally:
-        cur.close()
-        conn.close()
+        return _serialize_route_step(
+            route_step_id=new_row[0],
+            step_no=new_row[1],
+            process_id=new_row[2],
+            process_code=proc_row[1],
+            process_name=proc_row[2],
+            notes=new_row[3],
+        )
 
 
 @router.put("/route-steps/{route_step_id}")
@@ -232,9 +216,7 @@ def update_route_step(route_step_id: int, payload: RouteStepUpdate):
     if not update_fields:
         return {"status": "no_changes"}
 
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
+    with db_cursor() as (conn, cur):
         cur.execute(
             "select route_id, step_no, process_id, notes from route_steps where route_step_id = %s",
             (route_step_id,),
@@ -315,24 +297,19 @@ def update_route_step(route_step_id: int, payload: RouteStepUpdate):
 
         conn.commit()
 
-        return {
-            "route_step_id": updated[0],
-            "step_no": updated[1],
-            "process_id": updated[2],
-            "process_code": proc_row[0],
-            "process_name": proc_row[1],
-            "notes": updated[3] or "",
-        }
-    finally:
-        cur.close()
-        conn.close()
+        return _serialize_route_step(
+            route_step_id=updated[0],
+            step_no=updated[1],
+            process_id=updated[2],
+            process_code=proc_row[0],
+            process_name=proc_row[1],
+            notes=updated[3],
+        )
 
 
 @router.delete("/route-steps/{route_step_id}")
 def delete_route_step(route_step_id: int):
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
+    with db_cursor() as (conn, cur):
         cur.execute(
             "select route_id, step_no from route_steps where route_step_id = %s",
             (route_step_id,),
@@ -366,6 +343,3 @@ def delete_route_step(route_step_id: int):
 
         conn.commit()
         return {"status": "deleted"}
-    finally:
-        cur.close()
-        conn.close()

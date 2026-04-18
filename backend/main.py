@@ -1,7 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from database import get_connection
 from routers import (
     planning_router,
     processes_router,
@@ -9,6 +8,7 @@ from routers import (
     routes_router,
     semi_finished_router,
 )
+from utils.db import db_cursor
 
 
 app = FastAPI(title="PlaneUP API")
@@ -29,12 +29,9 @@ def root():
 
 @app.get("/health/db")
 def health_db():
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("select current_database();")
-    result = cur.fetchone()
-    cur.close()
-    conn.close()
+    with db_cursor() as (_, cur):
+        cur.execute("select current_database();")
+        result = cur.fetchone()
     return {"database": result[0]}
 
 
