@@ -171,6 +171,14 @@
     padding: "8px 14px",
     fontWeight: 600,
   },
+  dangerButton: {
+    background: "#fff5f3",
+    color: "#a12d2d",
+    border: "1px solid #f2c8bc",
+    borderRadius: "10px",
+    padding: "10px 16px",
+    fontWeight: 700,
+  },
   mainHeader: {
     display: "flex",
     justifyContent: "flex-end",
@@ -280,9 +288,59 @@
     flexDirection: "column",
     gap: "12px",
   },
+  relationsToolbar: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: "12px",
+    flexWrap: "wrap",
+  },
+  relationsToolbarText: {
+    color: "#11224d",
+    fontWeight: 600,
+    fontSize: "14px",
+  },
+  relationsTableWrap: {
+    overflowX: "auto",
+  },
   relationsTable: {
     width: "100%",
     borderCollapse: "collapse",
+  },
+  relationFormPanel: {
+    marginTop: "4px",
+  },
+  relationFormHeader: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: "10px",
+    marginBottom: "12px",
+    flexWrap: "wrap",
+  },
+  relationFormTitle: {
+    margin: 0,
+    color: "#11224d",
+    fontSize: "16px",
+  },
+  relationFormMeta: {
+    color: "#6d7b98",
+    fontSize: "13px",
+    fontWeight: 600,
+  },
+  relationFormGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+    gap: "12px",
+  },
+  relationFormActions: {
+    display: "flex",
+    gap: "8px",
+    flexWrap: "wrap",
+    marginTop: "14px",
+  },
+  mutedText: {
+    color: "#6d7b98",
   },
   successText: {
     color: "#1f7a39",

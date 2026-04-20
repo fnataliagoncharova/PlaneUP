@@ -3,9 +3,10 @@ import io
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
+from psycopg2 import IntegrityError, errorcodes
 
 from constants import ALLOWED_UNITS
-from schemas.products import ProductUpdate
+from schemas.products import ProductComponentCreate, ProductComponentUpdate, ProductUpdate
 from utils.db import db_cursor
 from utils.excel import (
     build_import_response,
@@ -27,6 +28,179 @@ def _serialize_product(row):
         "unit_of_measure": row[3],
         "is_active": bool(row[4]),
     }
+
+
+def _serialize_product_component(row):
+    return {
+        "component_id": row[0],
+        "product_id": row[1],
+        "semi_finished_id": row[2],
+        "semi_finished_code": row[3],
+        "semi_finished_name": row[4],
+        "route_id": row[5],
+        "route_code": row[6],
+        "route_name": row[7],
+        "component_qty": float(row[8]),
+        "product_qty": float(row[9]),
+        "priority": row[10],
+        "valid_from": str(row[11]) if row[11] else None,
+        "valid_to": str(row[12]) if row[12] else None,
+        "active": bool(row[13]),
+    }
+
+
+def _serialize_structure_component(component):
+    return {
+        "semi_finished_code": component["semi_finished_code"],
+        "semi_finished_name": component["semi_finished_name"],
+        "component_qty": component["component_qty"],
+        "product_qty": component["product_qty"],
+        "priority": component["priority"],
+        "route_code": component["route_code"],
+        "route_name": component["route_name"],
+    }
+
+
+def _get_product_row(cur, product_code: str):
+    cur.execute(
+        """
+        select product_id, product_code, product_name
+        from products
+        where product_code = %s
+        """,
+        (product_code,),
+    )
+    return cur.fetchone()
+
+
+def _get_product_components(cur, product_id: int):
+    cur.execute(
+        """
+        select
+            c.component_id,
+            c.product_id,
+            c.semi_finished_id,
+            sf.semi_finished_code,
+            sf.semi_finished_name,
+            c.route_id,
+            r.route_code,
+            r.route_name,
+            c.component_qty,
+            c.product_qty,
+            c.priority,
+            c.valid_from,
+            c.valid_to,
+            c.active
+        from product_semi_finished_components c
+        join semi_finished sf on sf.semi_finished_id = c.semi_finished_id
+        join routes r on r.route_id = c.route_id
+        where c.product_id = %s
+        order by c.priority, c.component_id
+        """,
+        (product_id,),
+    )
+    return [_serialize_product_component(row) for row in cur.fetchall()]
+
+
+def _get_product_component(cur, product_id: int, component_id: int):
+    cur.execute(
+        """
+        select
+            c.component_id,
+            c.product_id,
+            c.semi_finished_id,
+            sf.semi_finished_code,
+            sf.semi_finished_name,
+            c.route_id,
+            r.route_code,
+            r.route_name,
+            c.component_qty,
+            c.product_qty,
+            c.priority,
+            c.valid_from,
+            c.valid_to,
+            c.active
+        from product_semi_finished_components c
+        join semi_finished sf on sf.semi_finished_id = c.semi_finished_id
+        join routes r on r.route_id = c.route_id
+        where c.product_id = %s and c.component_id = %s
+        """,
+        (product_id, component_id),
+    )
+    row = cur.fetchone()
+    return _serialize_product_component(row) if row else None
+
+
+def _get_product_component_state(cur, product_id: int, component_id: int):
+    cur.execute(
+        """
+        select
+            component_id,
+            semi_finished_id,
+            route_id,
+            component_qty,
+            product_qty,
+            priority,
+            valid_from,
+            valid_to,
+            active
+        from product_semi_finished_components
+        where product_id = %s and component_id = %s
+        """,
+        (product_id, component_id),
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "component_id": row[0],
+        "semi_finished_id": row[1],
+        "route_id": row[2],
+        "component_qty": row[3],
+        "product_qty": row[4],
+        "priority": row[5],
+        "valid_from": row[6],
+        "valid_to": row[7],
+        "active": row[8],
+    }
+
+
+def _ensure_semi_finished_exists(cur, semi_finished_id: int):
+    cur.execute(
+        "select 1 from semi_finished where semi_finished_id = %s",
+        (semi_finished_id,),
+    )
+    if not cur.fetchone():
+        raise HTTPException(status_code=400, detail="Unknown semi_finished_id")
+
+
+def _ensure_route_exists(cur, route_id: int):
+    cur.execute(
+        "select 1 from routes where route_id = %s",
+        (route_id,),
+    )
+    if not cur.fetchone():
+        raise HTTPException(status_code=400, detail="Unknown route_id")
+
+
+def _validate_component_values(cur, values):
+    if values["semi_finished_id"] is None:
+        raise HTTPException(status_code=400, detail="semi_finished_id is required")
+    if values["route_id"] is None:
+        raise HTTPException(status_code=400, detail="route_id is required")
+    if values["component_qty"] is None or values["component_qty"] <= 0:
+        raise HTTPException(status_code=400, detail="component_qty must be > 0")
+    if values["product_qty"] is None or values["product_qty"] <= 0:
+        raise HTTPException(status_code=400, detail="product_qty must be > 0")
+    if values["priority"] is None or int(values["priority"]) < 1:
+        raise HTTPException(status_code=400, detail="priority must be >= 1")
+    if values["valid_from"] and values["valid_to"] and values["valid_to"] < values["valid_from"]:
+        raise HTTPException(status_code=400, detail="valid_to must be >= valid_from")
+    if values["active"] is None:
+        raise HTTPException(status_code=400, detail="active is required")
+
+    _ensure_semi_finished_exists(cur, values["semi_finished_id"])
+    _ensure_route_exists(cur, values["route_id"])
 
 
 @router.get("/products")
@@ -236,58 +410,183 @@ def import_products(file: UploadFile = File(...)):
     )
 
 
+@router.get("/products/{product_code}/components")
+def get_product_component_list(product_code: str):
+    with db_cursor() as (_, cur):
+        product_row = _get_product_row(cur, product_code)
+        if not product_row:
+            raise HTTPException(status_code=404, detail="Product not found")
+
+        components = _get_product_components(cur, product_row[0])
+
+    return {
+        "product_id": product_row[0],
+        "product_code": product_row[1],
+        "product_name": product_row[2],
+        "components": components,
+    }
+
+
+@router.post("/products/{product_code}/components")
+def create_product_component(product_code: str, payload: ProductComponentCreate):
+    values = payload.dict()
+
+    with db_cursor() as (conn, cur):
+        product_row = _get_product_row(cur, product_code)
+        if not product_row:
+            raise HTTPException(status_code=404, detail="Product not found")
+
+        _validate_component_values(cur, values)
+
+        cur.execute(
+            """
+            insert into product_semi_finished_components (
+                product_id,
+                semi_finished_id,
+                route_id,
+                component_qty,
+                product_qty,
+                priority,
+                valid_from,
+                valid_to,
+                active
+            )
+            values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            returning component_id
+            """,
+            (
+                product_row[0],
+                values["semi_finished_id"],
+                values["route_id"],
+                values["component_qty"],
+                values["product_qty"],
+                values["priority"],
+                values["valid_from"],
+                values["valid_to"],
+                values["active"],
+            ),
+        )
+        component_id = cur.fetchone()[0]
+        conn.commit()
+
+        created = _get_product_component(cur, product_row[0], component_id)
+        return created
+
+
+@router.put("/products/{product_code}/components/{component_id}")
+def update_product_component(
+    product_code: str,
+    component_id: int,
+    payload: ProductComponentUpdate,
+):
+    update_fields = payload.dict(exclude_unset=True)
+    if not update_fields:
+        return {"status": "no_changes"}
+
+    with db_cursor() as (conn, cur):
+        product_row = _get_product_row(cur, product_code)
+        if not product_row:
+            raise HTTPException(status_code=404, detail="Product not found")
+
+        current = _get_product_component_state(cur, product_row[0], component_id)
+        if not current:
+            raise HTTPException(status_code=404, detail="Product component not found")
+
+        merged_values = {
+            "semi_finished_id": update_fields.get("semi_finished_id", current["semi_finished_id"]),
+            "route_id": update_fields.get("route_id", current["route_id"]),
+            "component_qty": update_fields.get("component_qty", current["component_qty"]),
+            "product_qty": update_fields.get("product_qty", current["product_qty"]),
+            "priority": update_fields.get("priority", current["priority"]),
+            "valid_from": update_fields.get("valid_from", current["valid_from"]),
+            "valid_to": update_fields.get("valid_to", current["valid_to"]),
+            "active": update_fields.get("active", current["active"]),
+        }
+        _validate_component_values(cur, merged_values)
+
+        set_clauses = []
+        params = []
+        for field in [
+            "semi_finished_id",
+            "route_id",
+            "component_qty",
+            "product_qty",
+            "priority",
+            "valid_from",
+            "valid_to",
+            "active",
+        ]:
+            if field in update_fields:
+                set_clauses.append(f"{field} = %s")
+                params.append(update_fields[field])
+
+        if not set_clauses:
+            return {"status": "no_changes"}
+
+        params.extend([product_row[0], component_id])
+        cur.execute(
+            f"""
+            update product_semi_finished_components
+            set {', '.join(set_clauses)}, updated_at = now()
+            where product_id = %s and component_id = %s
+            """,
+            tuple(params),
+        )
+        conn.commit()
+
+        updated = _get_product_component(cur, product_row[0], component_id)
+        return updated
+
+
+@router.delete("/products/{product_code}/components/{component_id}")
+def delete_product_component(product_code: str, component_id: int):
+    with db_cursor() as (conn, cur):
+        product_row = _get_product_row(cur, product_code)
+        if not product_row:
+            raise HTTPException(status_code=404, detail="Product not found")
+
+        current = _get_product_component_state(cur, product_row[0], component_id)
+        if not current:
+            raise HTTPException(status_code=404, detail="Product component not found")
+
+        try:
+            cur.execute(
+                """
+                delete from product_semi_finished_components
+                where product_id = %s and component_id = %s
+                """,
+                (product_row[0], component_id),
+            )
+        except IntegrityError as exc:
+            conn.rollback()
+            if exc.pgcode == errorcodes.FOREIGN_KEY_VIOLATION:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Product component cannot be deleted because it is used in dependent data",
+                ) from exc
+            raise
+
+        conn.commit()
+        return {"status": "deleted"}
+
+
 @router.get("/products/{product_code}/structure")
 def get_product_structure(product_code: str):
     with db_cursor() as (_, cur):
-        cur.execute(
-            """
-            select
-                p.product_code,
-                p.product_name,
-                sf.semi_finished_code,
-                sf.semi_finished_name,
-                c.component_qty,
-                c.product_qty,
-                c.priority,
-                r.route_code,
-                r.route_name
-            from products p
-            join product_semi_finished_components c
-                on c.product_id = p.product_id
-            join semi_finished sf
-                on sf.semi_finished_id = c.semi_finished_id
-            join routes r
-                on r.route_id = c.route_id
-            where p.product_code = %s
-            order by c.priority
-            """,
-            (product_code,),
-        )
-        rows = cur.fetchall()
+        product_row = _get_product_row(cur, product_code)
+        if not product_row:
+            return {"error": "Product not found"}
 
-    if not rows:
+        components = _get_product_components(cur, product_row[0])
+
+    if not components:
         return {"error": "Product not found"}
 
-    result = {
-        "product_code": rows[0][0],
-        "product_name": rows[0][1],
-        "components": [],
+    return {
+        "product_code": product_row[1],
+        "product_name": product_row[2],
+        "components": [_serialize_structure_component(component) for component in components],
     }
-
-    for row in rows:
-        result["components"].append(
-            {
-                "semi_finished_code": row[2],
-                "semi_finished_name": row[3],
-                "component_qty": float(row[4]),
-                "product_qty": float(row[5]),
-                "priority": row[6],
-                "route_code": row[7],
-                "route_name": row[8],
-            }
-        )
-
-    return result
 
 
 @router.get("/products/{product_code}/needs")

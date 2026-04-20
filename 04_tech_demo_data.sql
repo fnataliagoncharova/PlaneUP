@@ -52,55 +52,83 @@ insert into route_steps (route_id, step_no, process_id, notes) values
         'Paper core winding'
     );
 
--- Material flow per step: показывает смену ПФ после передела
+-- Material flow per step: один выходной ПФ может иметь несколько входных строк
 with routes_map as (
     select route_id, route_code from routes
 ), sf as (
     select semi_finished_id, semi_finished_code from semi_finished
 )
 insert into route_step_material_flow (
-    route_id, step_no, input_semi_finished_id, output_semi_finished_id
+    route_id, step_no, input_semi_finished_id, output_semi_finished_id, input_qty, output_qty
 ) values
     -- простой выпуск клея: вход сырьё (null), выход SF-GLUE-PSA
     (
         (select route_id from routes_map where route_code = 'R-MIX-GLUE'),
         1,
         null,
-        (select semi_finished_id from sf where semi_finished_code = 'SF-GLUE-PSA')
+        (select semi_finished_id from sf where semi_finished_code = 'SF-GLUE-PSA'),
+        1.000,
+        1.000
     ),
-    -- ламинация: вход PET плёнка, выход ламинированный сэндвич
+    -- ламинация: шаг 1 собирает один выходной ПФ из двух входных ПФ
     (
         (select route_id from routes_map where route_code = 'R-LAM'),
         1,
         (select semi_finished_id from sf where semi_finished_code = 'SF-FILM-PET12'),
-        (select semi_finished_id from sf where semi_finished_code = 'SF-LAM-SANDW')
+        (select semi_finished_id from sf where semi_finished_code = 'SF-LAM-SANDW'),
+        1.000,
+        1.000
     ),
-    -- ламинация + перемотка: шаг 1 делает сэндвич, шаг 2 даёт новый ПФ после перемотки
+    (
+        (select route_id from routes_map where route_code = 'R-LAM'),
+        1,
+        (select semi_finished_id from sf where semi_finished_code = 'SF-GLUE-PSA'),
+        (select semi_finished_id from sf where semi_finished_code = 'SF-LAM-SANDW'),
+        0.050,
+        1.000
+    ),
+    -- ламинация + перемотка: шаг 1 делает сэндвич из плёнки и клея, шаг 2 даёт новый ПФ после перемотки
     (
         (select route_id from routes_map where route_code = 'R-LAM-REW'),
         1,
         (select semi_finished_id from sf where semi_finished_code = 'SF-FILM-PET12'),
-        (select semi_finished_id from sf where semi_finished_code = 'SF-LAM-SANDW')
+        (select semi_finished_id from sf where semi_finished_code = 'SF-LAM-SANDW'),
+        1.000,
+        1.000
+    ),
+    (
+        (select route_id from routes_map where route_code = 'R-LAM-REW'),
+        1,
+        (select semi_finished_id from sf where semi_finished_code = 'SF-GLUE-PSA'),
+        (select semi_finished_id from sf where semi_finished_code = 'SF-LAM-SANDW'),
+        0.050,
+        1.000
     ),
     (
         (select route_id from routes_map where route_code = 'R-LAM-REW'),
         2,
         (select semi_finished_id from sf where semi_finished_code = 'SF-LAM-SANDW'),
-        (select semi_finished_id from sf where semi_finished_code = 'SF-LAM-SANDW-TRIM')
+        (select semi_finished_id from sf where semi_finished_code = 'SF-LAM-SANDW-TRIM'),
+        1.000,
+        1.000
     ),
     -- печать: выпуск печатного слоя
     (
         (select route_id from routes_map where route_code = 'R-PRINT'),
         1,
         null,
-        (select semi_finished_id from sf where semi_finished_code = 'SF-PRINT-PR')
+        (select semi_finished_id from sf where semi_finished_code = 'SF-PRINT-PR'),
+        1.000,
+        1.000
     ),
     -- сердечник: выпуск бумажного сердечника
     (
         (select route_id from routes_map where route_code = 'R-CORE-STD'),
         1,
         null,
-        (select semi_finished_id from sf where semi_finished_code = 'SF-CORE-76')
+        (select semi_finished_id from sf where semi_finished_code = 'SF-CORE-76'),
+        1.000,
+        1.000
     );
 
 -- Machine process capability (примерные значения)

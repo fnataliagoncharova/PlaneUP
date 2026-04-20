@@ -23,7 +23,8 @@ create table route_steps (
     constraint chk_route_step_no_positive check (step_no > 0)
 );
 
--- Material flow per step: what semi-finished enters and leaves a step.
+-- Material flow per step: one output semi-finished can be produced
+-- from one or more input semi-finished entries on the same step.
 -- Degassing is captured as notes in route_steps, not as a separate step.
 create table route_step_material_flow (
     material_flow_id       bigint generated always as identity primary key,
@@ -31,14 +32,20 @@ create table route_step_material_flow (
     step_no                integer not null,
     input_semi_finished_id bigint references semi_finished(semi_finished_id),
     output_semi_finished_id bigint not null references semi_finished(semi_finished_id),
+    input_qty              numeric(12,3) not null default 1.000,
+    output_qty             numeric(12,3) not null default 1.000,
     created_at             timestamptz not null default now(),
     updated_at             timestamptz not null default now(),
     constraint fk_flow_route_step foreign key (route_id, step_no)
         references route_steps(route_id, step_no),
-    constraint uq_flow_per_step unique (route_id, step_no),
     constraint chk_flow_step_no_positive check (step_no > 0),
+    constraint chk_flow_input_qty_positive check (input_qty > 0),
+    constraint chk_flow_output_qty_positive check (output_qty > 0),
     constraint chk_flow_output_not_blank check (output_semi_finished_id is not null)
 );
+
+create index idx_route_step_material_flow_route_step
+    on route_step_material_flow (route_id, step_no);
 
 create table machine_process_capability (
     capability_id    bigint generated always as identity primary key,
